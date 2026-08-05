@@ -1,16 +1,155 @@
 package com.faifai.rider;
-import android.Manifest; import android.annotation.SuppressLint; import android.app.Activity; import android.content.*; import android.content.pm.PackageManager; import android.graphics.Color; import android.os.*; import android.view.KeyEvent; import android.webkit.*;
-public class MainActivity extends Activity {
- private static final int PICK_RINGTONE=801; private WebView webView; private android.media.Ringtone preview; private final Handler h=new Handler(Looper.getMainLooper());
- private final Runnable sync=new Runnable(){public void run(){if(webView!=null)webView.evaluateJavascript("(function(){try{return localStorage.getItem('rider_auth')||''}catch(e){return ''}})()",v->new RiderBridge().configureRider(v));h.postDelayed(this,5000);}};
- @SuppressLint({"SetJavaScriptEnabled","JavascriptInterface"}) @Override protected void onCreate(Bundle b){super.onCreate(b);if(Build.VERSION.SDK_INT>=33&&checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)!=PackageManager.PERMISSION_GRANTED)requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS},55);webView=new WebView(this);webView.setBackgroundColor(Color.rgb(2,8,23));WebSettings s=webView.getSettings();s.setJavaScriptEnabled(true);s.setDomStorageEnabled(true);s.setDatabaseEnabled(true);s.setMediaPlaybackRequiresUserGesture(false);s.setUserAgentString(s.getUserAgentString()+" FaiFaiRider/1.1");webView.addJavascriptInterface(new RiderBridge(),"FaiFaiRider");webView.setWebChromeClient(new WebChromeClient());webView.setWebViewClient(new WebViewClient(){@Override public void onPageFinished(WebView v,String u){h.removeCallbacks(sync);h.post(sync);}});android.widget.FrameLayout root=new android.widget.FrameLayout(this);root.addView(webView,new android.widget.FrameLayout.LayoutParams(-1,-1));android.widget.Button bell=new android.widget.Button(this);bell.setText("🔔");bell.setTextSize(21);bell.setContentDescription("Rider ringtone settings");bell.setOnClickListener(v->showRingSettings());android.widget.FrameLayout.LayoutParams bp=new android.widget.FrameLayout.LayoutParams(dp(58),dp(58),android.view.Gravity.END|android.view.Gravity.BOTTOM);bp.setMargins(0,0,dp(16),dp(22));root.addView(bell,bp);setContentView(root);webView.loadUrl("https://fai-fai-juice.pages.dev/rider");}
 
- private int dp(int n){return Math.round(n*getResources().getDisplayMetrics().density);}
- private void showRingSettings(){android.content.SharedPreferences p=getSharedPreferences("fai_fai_rider",MODE_PRIVATE);boolean on=p.getBoolean("native_sound",true);String[] a={"Choose rider ringtone","Test selected ringtone",on?"Turn ring OFF":"Turn ring ON","Stop test"};new android.app.AlertDialog.Builder(this).setTitle("Rider Ring Settings").setItems(a,(d,w)->{if(w==0)pickRing();else if(w==1)testRing();else if(w==2){p.edit().putBoolean("native_sound",!on).apply();android.widget.Toast.makeText(this,!on?"Rider ring ON":"Rider ring OFF",android.widget.Toast.LENGTH_SHORT).show();}else stopPreview();}).setNegativeButton("Close",null).show();}
- private void pickRing(){android.content.SharedPreferences p=getSharedPreferences("fai_fai_rider",MODE_PRIVATE);String s=p.getString("ringtone_uri","");android.content.Intent i=new android.content.Intent(android.media.RingtoneManager.ACTION_RINGTONE_PICKER);i.putExtra(android.media.RingtoneManager.EXTRA_RINGTONE_TYPE,android.media.RingtoneManager.TYPE_ALARM|android.media.RingtoneManager.TYPE_RINGTONE|android.media.RingtoneManager.TYPE_NOTIFICATION);i.putExtra(android.media.RingtoneManager.EXTRA_RINGTONE_TITLE,"Choose Rider Ring");i.putExtra(android.media.RingtoneManager.EXTRA_RINGTONE_SHOW_SILENT,false);i.putExtra(android.media.RingtoneManager.EXTRA_RINGTONE_EXISTING_URI,s==null||s.isEmpty()?android.media.RingtoneManager.getDefaultUri(android.media.RingtoneManager.TYPE_ALARM):android.net.Uri.parse(s));startActivityForResult(i,PICK_RINGTONE);}
- @Override protected void onActivityResult(int r,int c,android.content.Intent i){super.onActivityResult(r,c,i);if(r==PICK_RINGTONE&&c==RESULT_OK&&i!=null){android.net.Uri u=i.getParcelableExtra(android.media.RingtoneManager.EXTRA_RINGTONE_PICKED_URI);if(u!=null){getSharedPreferences("fai_fai_rider",MODE_PRIVATE).edit().putString("ringtone_uri",u.toString()).putBoolean("native_sound",true).apply();testRing();}}}
- private void testRing(){stopPreview();String s=getSharedPreferences("fai_fai_rider",MODE_PRIVATE).getString("ringtone_uri","");android.net.Uri u=s==null||s.isEmpty()?android.media.RingtoneManager.getDefaultUri(android.media.RingtoneManager.TYPE_ALARM):android.net.Uri.parse(s);preview=android.media.RingtoneManager.getRingtone(this,u);if(preview!=null)preview.play();}
- private void stopPreview(){if(preview!=null){try{preview.stop();}catch(Exception ignored){}preview=null;}}
- @Override public boolean onKeyDown(int k,KeyEvent e){if(k==KeyEvent.KEYCODE_BACK&&webView.canGoBack()){webView.goBack();return true;}return super.onKeyDown(k,e);}@Override protected void onDestroy(){h.removeCallbacks(sync);stopPreview();if(webView!=null)webView.destroy();super.onDestroy();}
- public final class RiderBridge{@JavascriptInterface public void configureRider(String raw){String j=raw==null?"":raw;if(j.startsWith("\"")&&j.endsWith("\""))j=j.substring(1,j.length()-1).replace("\\\"","\"").replace("\\\\","\\");try{org.json.JSONObject o=new org.json.JSONObject(j);int id=o.optInt("id",0);if(id>0){getSharedPreferences("fai_fai_rider",MODE_PRIVATE).edit().putInt("rider_id",id).putString("name",o.optString("name","Rider")).apply();startForegroundService(new Intent(MainActivity.this,RiderOrderService.class).setAction(RiderOrderService.ACTION_START));}}catch(Exception ignored){}}}
+import android.Manifest;
+import android.annotation.SuppressLint;
+import android.app.Activity;
+import android.app.AlertDialog;
+import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.graphics.Color;
+import android.net.Uri;
+import android.os.Build;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.provider.Settings;
+import android.view.KeyEvent;
+import android.webkit.JavascriptInterface;
+import android.webkit.WebChromeClient;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
+
+public class MainActivity extends Activity {
+    private static final int NOTIFICATION_PERMISSION_REQUEST = 55;
+    private WebView webView;
+    private final Handler handler = new Handler(Looper.getMainLooper());
+
+    private final Runnable syncRider = new Runnable() {
+        @Override public void run() {
+            if (webView != null) {
+                webView.evaluateJavascript(
+                    "(function(){try{return localStorage.getItem('rider_auth')||''}catch(e){return ''}})()",
+                    value -> new RiderBridge().configureRider(value)
+                );
+            }
+            handler.postDelayed(this, 5000);
+        }
+    };
+
+    @SuppressLint({"SetJavaScriptEnabled", "JavascriptInterface"})
+    @Override protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+
+        webView = new WebView(this);
+        webView.setBackgroundColor(Color.rgb(2, 8, 23));
+        WebSettings settings = webView.getSettings();
+        settings.setJavaScriptEnabled(true);
+        settings.setDomStorageEnabled(true);
+        settings.setDatabaseEnabled(true);
+        settings.setMediaPlaybackRequiresUserGesture(false);
+        settings.setUserAgentString(settings.getUserAgentString() + " FaiFaiRider/2.0");
+        webView.addJavascriptInterface(new RiderBridge(), "FaiFaiRider");
+        webView.setWebChromeClient(new WebChromeClient());
+        webView.setWebViewClient(new WebViewClient() {
+            @Override public void onPageFinished(WebView view, String url) {
+                view.evaluateJavascript(
+                    "document.documentElement.classList.add('fai-fai-rider-native');" +
+                    "document.documentElement.dataset.faiFaiRiderNative='true';",
+                    null
+                );
+                handler.removeCallbacks(syncRider);
+                handler.post(syncRider);
+            }
+        });
+        setContentView(webView);
+        webView.loadUrl("https://fai-fai-juice.pages.dev/rider");
+
+        requestNativeNotificationPermission();
+    }
+
+    private void requestNativeNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(
+                new String[]{Manifest.permission.POST_NOTIFICATIONS},
+                NOTIFICATION_PERMISSION_REQUEST
+            );
+        }
+    }
+
+    @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
+        super.onRequestPermissionsResult(requestCode, permissions, results);
+        if (requestCode == NOTIFICATION_PERMISSION_REQUEST &&
+            (results.length == 0 || results[0] != PackageManager.PERMISSION_GRANTED)) {
+            showNotificationSettingsDialog();
+        }
+    }
+
+    private void showNotificationSettingsDialog() {
+        if (isFinishing()) return;
+        new AlertDialog.Builder(this)
+            .setTitle("Allow Rider notifications")
+            .setMessage("New delivery alert aur Admin-selected ring ke liye Notifications ON karein.")
+            .setNegativeButton("Later", null)
+            .setPositiveButton("Open Settings", (dialog, which) -> openNotificationSettings())
+            .show();
+    }
+
+    private void openNotificationSettings() {
+        Intent intent = new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+            .putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName());
+        try {
+            startActivity(intent);
+        } catch (Exception ignored) {
+            startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                .setData(Uri.parse("package:" + getPackageName())));
+        }
+    }
+
+    @Override public boolean onKeyDown(int keyCode, KeyEvent event) {
+        if (keyCode == KeyEvent.KEYCODE_BACK && webView.canGoBack()) {
+            webView.goBack();
+            return true;
+        }
+        return super.onKeyDown(keyCode, event);
+    }
+
+    @Override protected void onDestroy() {
+        handler.removeCallbacks(syncRider);
+        if (webView != null) webView.destroy();
+        super.onDestroy();
+    }
+
+    public final class RiderBridge {
+        @JavascriptInterface public boolean isNativeApp() {
+            return true;
+        }
+
+        @JavascriptInterface public void openNotificationSettings() {
+            runOnUiThread(MainActivity.this::openNotificationSettings);
+        }
+
+        @JavascriptInterface public void configureRider(String raw) {
+            String json = raw == null ? "" : raw;
+            if (json.startsWith("\"") && json.endsWith("\"")) {
+                json = json.substring(1, json.length() - 1)
+                    .replace("\\\"", "\"")
+                    .replace("\\\\", "\\");
+            }
+            try {
+                org.json.JSONObject rider = new org.json.JSONObject(json);
+                int riderId = rider.optInt("id", 0);
+                if (riderId > 0) {
+                    getSharedPreferences("fai_fai_rider", MODE_PRIVATE)
+                        .edit()
+                        .putInt("rider_id", riderId)
+                        .putString("name", rider.optString("name", "Rider"))
+                        .apply();
+                    startForegroundService(new Intent(MainActivity.this, RiderOrderService.class)
+                        .setAction(RiderOrderService.ACTION_START));
+                }
+            } catch (Exception ignored) { }
+        }
+    }
 }
