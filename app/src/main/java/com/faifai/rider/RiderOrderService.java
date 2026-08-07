@@ -7,14 +7,12 @@ import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
-import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.location.Location;
 import android.location.LocationListener;
 import android.location.LocationManager;
 import android.media.AudioAttributes;
 import android.media.MediaPlayer;
-import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.IBinder;
@@ -26,11 +24,15 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import android.util.Base64;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -44,6 +46,10 @@ public class RiderOrderService extends Service {
     private static final String BASE =
             "https://vita-napoli-backend-usman.onrender.com/api/v1/rider";
 
+    // Admin controls the Rider ringtone from Receipt & Printer settings.
+    private static final String SETTINGS_API =
+            "https://vita-napoli-backend-usman.onrender.com/api/v1/receipt-settings";
+
     private static final long LOCATION_MIN_TIME_MS = 10_000L;
     private static final float LOCATION_MIN_DISTANCE_M = 5f;
 
@@ -51,6 +57,11 @@ public class RiderOrderService extends Service {
             Executors.newSingleThreadScheduledExecutor();
 
     private MediaPlayer alarm;
+    private volatile boolean adminAlarmEnabled = true;
+    private volatile String adminAlarmAudio = "";
+    private volatile String playingAlarmAudio = "";
+    private volatile long lastSettingsCheck = 0L;
+
     private LocationManager locationManager;
     private LocationListener locationListener;
     private PowerManager.WakeLock wakeLock;
@@ -249,6 +260,8 @@ public class RiderOrderService extends Service {
     }
 
     private void pollOrders() {
+        refreshAdminAlarm();
+
         int riderId = riderId();
         if (riderId <= 0) {
             stopAlarm();
@@ -295,17 +308,15 @@ public class RiderOrderService extends Service {
 
         getSystemService(NotificationManager.class).notify(62, notification);
 
-        SharedPreferences prefs = getSharedPreferences("fai_fai_rider", MODE_PRIVATE);
-        if (prefs.getBoolean("native_sound", true) && alarm == null) {
+        // No local/default ringtone is used. Only the ringtone selected by Admin plays.
+        if (adminAlarmEnabled
+                && adminAlarmAudio != null
+                && !adminAlarmAudio.isEmpty()
+                && alarm == null) {
             try {
-                String saved = prefs.getString("ringtone_uri", "");
-                Uri uri = (saved == null || saved.isEmpty())
-                        ? android.media.RingtoneManager.getDefaultUri(
-                        android.media.RingtoneManager.TYPE_ALARM)
-                        : Uri.parse(saved);
-
+                File audioFile = adminAudioFile(adminAlarmAudio, "rider_admin_ring");
                 alarm = new MediaPlayer();
-                alarm.setDataSource(this, uri);
+                alarm.setDataSource(audioFile.getAbsolutePath());
                 alarm.setAudioAttributes(
                         new AudioAttributes.Builder()
                                 .setUsage(AudioAttributes.USAGE_ALARM)
@@ -314,10 +325,69 @@ public class RiderOrderService extends Service {
                 alarm.setLooping(true);
                 alarm.prepare();
                 alarm.start();
+                playingAlarmAudio = adminAlarmAudio;
             } catch (Exception e) {
-                stopAlarm();
+                stopAudioOnly();
             }
         }
+    }
+
+    private void refreshAdminAlarm() {
+        long now = System.currentTimeMillis();
+        if (now - lastSettingsCheck < 60_000L) return;
+        lastSettingsCheck = now;
+
+        try {
+            JSONObject settings = new JSONObject(
+                    request("GET", SETTINGS_API, null)
+            );
+
+            boolean enabled = settings.optBoolean("rider_alarm_enabled", true);
+            String audio = settings.optString("rider_alarm_audio", "");
+            if (audio == null) audio = "";
+
+            boolean soundChanged = !audio.equals(adminAlarmAudio);
+            adminAlarmEnabled = enabled;
+            adminAlarmAudio = audio;
+
+            // Admin turned Rider ring OFF or changed the selected sound.
+            // Stop only audio here; keep the delivery notification visible.
+            if (!adminAlarmEnabled || soundChanged) {
+                stopAudioOnly();
+            }
+        } catch (Exception ignored) {
+            // Keep the last successfully loaded Admin setting.
+        }
+    }
+
+    private File adminAudioFile(String dataUrl, String name) throws IOException {
+        int comma = dataUrl.indexOf(',');
+        if (!dataUrl.startsWith("data:audio/") || comma < 0) {
+            throw new IOException("Invalid Admin Rider ring");
+        }
+
+        byte[] bytes = Base64.decode(
+                dataUrl.substring(comma + 1),
+                Base64.DEFAULT
+        );
+
+        File file = new File(getCacheDir(), name + ".audio");
+        try (FileOutputStream output = new FileOutputStream(file, false)) {
+            output.write(bytes);
+        }
+        return file;
+    }
+
+    private synchronized void stopAudioOnly() {
+        if (alarm != null) {
+            try {
+                alarm.stop();
+            } catch (Exception ignored) {
+            }
+            alarm.release();
+            alarm = null;
+        }
+        playingAlarmAudio = "";
     }
 
     private PendingIntent action(String action, int assignmentId, int requestCode) {
@@ -389,14 +459,7 @@ public class RiderOrderService extends Service {
 
     private synchronized void stopAlarm() {
         getSystemService(NotificationManager.class).cancel(62);
-        if (alarm != null) {
-            try {
-                alarm.stop();
-            } catch (Exception ignored) {
-            }
-            alarm.release();
-            alarm = null;
-        }
+        stopAudioOnly();
     }
 
     private synchronized void stopLocationTracking() {

@@ -20,20 +20,16 @@ import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
-import android.widget.Button;
 import android.widget.FrameLayout;
-import android.widget.Toast;
 
 import java.util.ArrayList;
 import java.util.List;
 
 public class MainActivity extends Activity {
-    private static final int PICK_RINGTONE = 801;
     private static final int REQ_FOREGROUND_PERMISSIONS = 55;
     private static final int REQ_BACKGROUND_LOCATION = 56;
 
     private WebView webView;
-    private android.media.Ringtone preview;
     private final Handler handler = new Handler(Looper.getMainLooper());
 
     private final Runnable sync = new Runnable() {
@@ -71,7 +67,7 @@ public class MainActivity extends Activity {
         settings.setDomStorageEnabled(true);
         settings.setDatabaseEnabled(true);
         settings.setMediaPlaybackRequiresUserGesture(false);
-        settings.setUserAgentString(settings.getUserAgentString() + " FaiFaiRider/1.2");
+        settings.setUserAgentString(settings.getUserAgentString() + " FaiFaiRider/1.3");
         webView.addJavascriptInterface(new RiderBridge(), "FaiFaiRider");
         webView.setWebChromeClient(new WebChromeClient());
         webView.setWebViewClient(new WebViewClient() {
@@ -84,18 +80,6 @@ public class MainActivity extends Activity {
 
         FrameLayout root = new FrameLayout(this);
         root.addView(webView, new FrameLayout.LayoutParams(-1, -1));
-
-        // Keep the existing custom rider-ring control unchanged.
-        Button bell = new Button(this);
-        bell.setText("🔔");
-        bell.setTextSize(21);
-        bell.setContentDescription("Rider ringtone settings");
-        bell.setOnClickListener(v -> showRingSettings());
-        FrameLayout.LayoutParams bellParams = new FrameLayout.LayoutParams(
-                dp(58), dp(58), android.view.Gravity.END | android.view.Gravity.BOTTOM
-        );
-        bellParams.setMargins(0, 0, dp(16), dp(22));
-        root.addView(bell, bellParams);
 
         setContentView(root);
         webView.loadUrl("https://fai-fai-juice.pages.dev/rider");
@@ -207,101 +191,6 @@ public class MainActivity extends Activity {
         }
     }
 
-    private int dp(int n) {
-        return Math.round(n * getResources().getDisplayMetrics().density);
-    }
-
-    private void showRingSettings() {
-        SharedPreferences prefs = getSharedPreferences("fai_fai_rider", MODE_PRIVATE);
-        boolean on = prefs.getBoolean("native_sound", true);
-        String[] actions = {
-                "Choose rider ringtone",
-                "Test selected ringtone",
-                on ? "Turn ring OFF" : "Turn ring ON",
-                "Stop test"
-        };
-        new AlertDialog.Builder(this)
-                .setTitle("Rider Ring Settings")
-                .setItems(actions, (dialog, which) -> {
-                    if (which == 0) pickRing();
-                    else if (which == 1) testRing();
-                    else if (which == 2) {
-                        prefs.edit().putBoolean("native_sound", !on).apply();
-                        Toast.makeText(
-                                this,
-                                !on ? "Rider ring ON" : "Rider ring OFF",
-                                Toast.LENGTH_SHORT
-                        ).show();
-                    } else {
-                        stopPreview();
-                    }
-                })
-                .setNegativeButton("Close", null)
-                .show();
-    }
-
-    private void pickRing() {
-        SharedPreferences prefs = getSharedPreferences("fai_fai_rider", MODE_PRIVATE);
-        String saved = prefs.getString("ringtone_uri", "");
-        Intent intent = new Intent(android.media.RingtoneManager.ACTION_RINGTONE_PICKER);
-        intent.putExtra(
-                android.media.RingtoneManager.EXTRA_RINGTONE_TYPE,
-                android.media.RingtoneManager.TYPE_ALARM
-                        | android.media.RingtoneManager.TYPE_RINGTONE
-                        | android.media.RingtoneManager.TYPE_NOTIFICATION
-        );
-        intent.putExtra(android.media.RingtoneManager.EXTRA_RINGTONE_TITLE, "Choose Rider Ring");
-        intent.putExtra(android.media.RingtoneManager.EXTRA_RINGTONE_SHOW_SILENT, false);
-        intent.putExtra(
-                android.media.RingtoneManager.EXTRA_RINGTONE_EXISTING_URI,
-                saved == null || saved.isEmpty()
-                        ? android.media.RingtoneManager.getDefaultUri(
-                        android.media.RingtoneManager.TYPE_ALARM)
-                        : Uri.parse(saved)
-        );
-        startActivityForResult(intent, PICK_RINGTONE);
-    }
-
-    @Override
-    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-        super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == PICK_RINGTONE && resultCode == RESULT_OK && data != null) {
-            Uri uri = data.getParcelableExtra(
-                    android.media.RingtoneManager.EXTRA_RINGTONE_PICKED_URI
-            );
-            if (uri != null) {
-                getSharedPreferences("fai_fai_rider", MODE_PRIVATE)
-                        .edit()
-                        .putString("ringtone_uri", uri.toString())
-                        .putBoolean("native_sound", true)
-                        .apply();
-                testRing();
-            }
-        }
-    }
-
-    private void testRing() {
-        stopPreview();
-        String saved = getSharedPreferences("fai_fai_rider", MODE_PRIVATE)
-                .getString("ringtone_uri", "");
-        Uri uri = saved == null || saved.isEmpty()
-                ? android.media.RingtoneManager.getDefaultUri(
-                android.media.RingtoneManager.TYPE_ALARM)
-                : Uri.parse(saved);
-        preview = android.media.RingtoneManager.getRingtone(this, uri);
-        if (preview != null) preview.play();
-    }
-
-    private void stopPreview() {
-        if (preview != null) {
-            try {
-                preview.stop();
-            } catch (Exception ignored) {
-            }
-            preview = null;
-        }
-    }
-
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
         if (keyCode == KeyEvent.KEYCODE_BACK && webView != null && webView.canGoBack()) {
@@ -314,7 +203,6 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         handler.removeCallbacks(sync);
-        stopPreview();
         if (webView != null) webView.destroy();
         super.onDestroy();
     }
