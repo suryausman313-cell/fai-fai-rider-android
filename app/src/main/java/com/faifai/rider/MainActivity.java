@@ -28,6 +28,9 @@ import java.net.URISyntaxException;
 import java.util.ArrayList;
 import java.util.List;
 
+import org.json.JSONObject;
+import org.json.JSONTokener;
+
 public class MainActivity extends Activity {
 
     private static final int REQ_FOREGROUND_PERMISSIONS = 55;
@@ -41,7 +44,7 @@ public class MainActivity extends Activity {
         public void run() {
             if (webView != null) {
                 webView.evaluateJavascript(
-                        "(function(){try{return localStorage.getItem('rider_auth')||''}catch(e){return ''}})()",
+                        "(function(){try{return JSON.stringify({rider:localStorage.getItem('rider_auth')||'',token:localStorage.getItem('rider_access_token')||''})}catch(e){return ''}})()",
                         value -> new RiderBridge().configureRider(value)
                 );
             }
@@ -57,16 +60,6 @@ public class MainActivity extends Activity {
 
         requestNeededPermissions();
 
-        // Start background Rider service again if Rider is already logged in.
-        int savedRiderId = getSharedPreferences(
-                "fai_fai_rider",
-                MODE_PRIVATE
-        ).getInt("rider_id", 0);
-
-        if (savedRiderId > 0) {
-            startRiderService();
-        }
-
         webView = new WebView(this);
         webView.setBackgroundColor(Color.rgb(2, 8, 23));
 
@@ -78,7 +71,7 @@ public class MainActivity extends Activity {
         settings.setMediaPlaybackRequiresUserGesture(false);
 
         settings.setUserAgentString(
-                settings.getUserAgentString() + " FaiFaiRider/1.3"
+                settings.getUserAgentString() + " FaiFaiRider/1.3.0"
         );
 
         webView.addJavascriptInterface(
@@ -537,16 +530,28 @@ public class MainActivity extends Activity {
 
     private void startRiderServiceIfLoggedIn() {
 
-        int riderId =
+        SharedPreferences prefs =
                 getSharedPreferences(
                         "fai_fai_rider",
                         MODE_PRIVATE
-                ).getInt(
-                        "rider_id",
-                        0
                 );
 
-        if (riderId > 0) {
+        int riderId = prefs.getInt("rider_id", 0);
+        String accessToken = prefs.getString("access_token", "");
+
+        boolean hasForegroundLocation =
+                checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
+                        == PackageManager.PERMISSION_GRANTED
+                || checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION)
+                        == PackageManager.PERMISSION_GRANTED;
+
+        // Android 14+ does not allow a location foreground service to start
+        // before location permission is granted. The permission callback will
+        // start it immediately after the Rider grants access.
+        if (riderId > 0
+                && accessToken != null
+                && !accessToken.trim().isEmpty()
+                && hasForegroundLocation) {
             startRiderService();
         }
     }
@@ -607,82 +612,85 @@ public class MainActivity extends Activity {
     }
 
 
+    private void clearNativeRiderSession() {
+        getSharedPreferences(
+                "fai_fai_rider",
+                MODE_PRIVATE
+        ).edit()
+                .remove("rider_id")
+                .remove("name")
+                .remove("access_token")
+                .apply();
+
+        try {
+            stopService(new Intent(this, RiderOrderService.class));
+        } catch (Exception ignored) {
+        }
+    }
+
+
     public final class RiderBridge {
 
-        @JavascriptInterface
-        public void configureRider(
-                String raw
-        ) {
-
-            String json =
-                    raw == null
-                            ? ""
-                            : raw;
-
-            if (json.startsWith("\"")
-                    && json.endsWith("\"")) {
-
-                json = json
-                        .substring(
-                                1,
-                                json.length() - 1
-                        )
-                        .replace(
-                                "\\\"",
-                                "\""
-                        )
-                        .replace(
-                                "\\\\",
-                                "\\"
-                        );
+        private String decodeJavascriptResult(String raw) {
+            if (raw == null || raw.trim().isEmpty() || "null".equalsIgnoreCase(raw.trim())) {
+                return "";
             }
 
+            try {
+                Object decoded = new JSONTokener(raw).nextValue();
+                if (decoded instanceof String) {
+                    return (String) decoded;
+                }
+            } catch (Exception ignored) {
+            }
 
-            if (json.isEmpty()
-                    || "null".equalsIgnoreCase(json)) {
+            return raw;
+        }
 
+        @JavascriptInterface
+        public void configureRider(String raw) {
+            String payloadText = decodeJavascriptResult(raw);
+
+            if (payloadText == null || payloadText.trim().isEmpty()) {
+                clearNativeRiderSession();
                 return;
             }
 
-
             try {
+                JSONObject payload = new JSONObject(payloadText);
+                String riderJson = payload.optString("rider", "").trim();
+                String accessToken = payload.optString("token", "").trim();
 
-                org.json.JSONObject object =
-                        new org.json.JSONObject(
-                                json
-                        );
-
-                int riderId =
-                        object.optInt(
-                                "id",
-                                0
-                        );
-
-                if (riderId > 0) {
-
-                    getSharedPreferences(
-                            "fai_fai_rider",
-                            MODE_PRIVATE
-                    )
-                            .edit()
-                            .putInt(
-                                    "rider_id",
-                                    riderId
-                            )
-                            .putString(
-                                    "name",
-                                    object.optString(
-                                            "name",
-                                            "Rider"
-                                    )
-                            )
-                            .apply();
-
-                    startRiderService();
+                if (riderJson.isEmpty() || accessToken.isEmpty()) {
+                    // Secure Rider sessions require both the Rider object and bearer token.
+                    clearNativeRiderSession();
+                    return;
                 }
 
+                JSONObject riderObject = new JSONObject(riderJson);
+                int riderId = riderObject.optInt("id", 0);
+
+                if (riderId <= 0) {
+                    clearNativeRiderSession();
+                    return;
+                }
+
+                getSharedPreferences(
+                        "fai_fai_rider",
+                        MODE_PRIVATE
+                ).edit()
+                        .putInt("rider_id", riderId)
+                        .putString("name", riderObject.optString("name", "Rider"))
+                        .putString("access_token", accessToken)
+                        .apply();
+
+                // Re-start/poke the service so it immediately picks up a new token after login.
+                startRiderService();
+
             } catch (Exception ignored) {
+                // Keep the current native session on a transient WebView/JSON error.
             }
         }
     }
+
 }
