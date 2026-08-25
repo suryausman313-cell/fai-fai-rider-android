@@ -56,6 +56,7 @@ public class RiderOrderService extends Service {
     private static final float LOCATION_MIN_DISTANCE_M = 5f;
     private static final long LOCATION_FRESHNESS_PING_SECONDS = 30L;
     private static final int ORDER_NOTIFICATION_BASE = 1000;
+    private static final int READY_NOTIFICATION_BASE = 2_000_000;
 
     private final ScheduledExecutorService worker =
             Executors.newSingleThreadScheduledExecutor();
@@ -67,6 +68,7 @@ public class RiderOrderService extends Service {
     private volatile long lastSettingsCheck = 0L;
     private volatile boolean authInvalid = false;
     private final Set<Integer> activeAssignmentNotifications = new HashSet<>();
+    private final Set<Integer> activeReadyNotifications = new HashSet<>();
 
     private LocationManager locationManager;
     private LocationListener locationListener;
@@ -327,23 +329,31 @@ public class RiderOrderService extends Service {
             ).optJSONArray("items");
 
             Set<Integer> currentAssigned = new HashSet<>();
+            Set<Integer> currentReady = new HashSet<>();
 
             if (items != null) {
                 for (int index = 0; index < items.length(); index++) {
                     JSONObject item = items.getJSONObject(index);
-                    if (!"assigned".equalsIgnoreCase(item.optString("status"))) {
-                        continue;
-                    }
-
+                    String assignmentStatus = item.optString("status", "");
+                    String orderStatus = item.optString("order_status", "");
                     int assignmentId = item.optInt("id");
                     if (assignmentId <= 0) continue;
 
-                    currentAssigned.add(assignmentId);
-                    notifyOrder(item);
+                    if ("assigned".equalsIgnoreCase(assignmentStatus)) {
+                        currentAssigned.add(assignmentId);
+                        notifyOrder(item);
+                    }
+
+                    if ("accepted".equalsIgnoreCase(assignmentStatus)
+                            && "ready".equalsIgnoreCase(orderStatus)) {
+                        currentReady.add(assignmentId);
+                        notifyReadyOrder(item);
+                    }
                 }
             }
 
             syncAssignmentNotifications(currentAssigned);
+            syncReadyNotifications(currentReady);
 
             if (currentAssigned.isEmpty()) {
                 stopAudioOnly();
@@ -361,15 +371,22 @@ public class RiderOrderService extends Service {
         return ORDER_NOTIFICATION_BASE + Math.abs(assignmentId % 1_000_000);
     }
 
+    private int readyNotificationId(int assignmentId) {
+        return READY_NOTIFICATION_BASE + Math.abs(assignmentId % 1_000_000);
+    }
+
     private synchronized void notifyOrder(JSONObject orderObject) {
         int assignmentId = orderObject.optInt("id");
         int orderId = orderObject.optInt("order_id");
         if (assignmentId <= 0) return;
+        boolean kitchenReady = "ready".equalsIgnoreCase(orderObject.optString("order_status", ""));
 
         Notification notification = new NotificationCompat.Builder(this, "rider_orders")
                 .setSmallIcon(android.R.drawable.ic_dialog_alert)
-                .setContentTitle("New Delivery #" + orderId)
-                .setContentText("Accept or reject this delivery")
+                .setContentTitle((kitchenReady ? "Ready Delivery #" : "New Delivery #") + orderId)
+                .setContentText(kitchenReady
+                        ? "Kitchen marked this order Ready. Accept it and pick it up."
+                        : "Accept or reject this delivery")
                 .setCategory(NotificationCompat.CATEGORY_ALARM)
                 .setPriority(NotificationCompat.PRIORITY_MAX)
                 .setOngoing(true)
@@ -393,6 +410,38 @@ public class RiderOrderService extends Service {
 
         activeAssignmentNotifications.clear();
         activeAssignmentNotifications.addAll(currentAssigned);
+    }
+
+    private synchronized void notifyReadyOrder(JSONObject orderObject) {
+        int assignmentId = orderObject.optInt("id");
+        int orderId = orderObject.optInt("order_id");
+        if (assignmentId <= 0 || activeReadyNotifications.contains(assignmentId)) return;
+
+        Notification notification = new NotificationCompat.Builder(this, "rider_orders")
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setContentTitle("Order #" + orderId + " is Ready")
+                .setContentText("Kitchen marked this order Ready. Please pick it up.")
+                .setCategory(NotificationCompat.CATEGORY_STATUS)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setOngoing(true)
+                .setOnlyAlertOnce(true)
+                .setAutoCancel(false)
+                .setContentIntent(openApp())
+                .build();
+
+        getSystemService(NotificationManager.class)
+                .notify(readyNotificationId(assignmentId), notification);
+        activeReadyNotifications.add(assignmentId);
+    }
+
+    private synchronized void syncReadyNotifications(Set<Integer> currentReady) {
+        NotificationManager manager = getSystemService(NotificationManager.class);
+        for (Integer previous : new HashSet<>(activeReadyNotifications)) {
+            if (!currentReady.contains(previous)) {
+                manager.cancel(readyNotificationId(previous));
+            }
+        }
+        activeReadyNotifications.retainAll(currentReady);
     }
 
     private synchronized void ensureAdminAlarmPlaying() {
@@ -529,10 +578,12 @@ public class RiderOrderService extends Service {
                     body.toString()
             );
 
-            getSystemService(NotificationManager.class)
-                    .cancel(orderNotificationId(assignmentId));
+            NotificationManager notificationManager = getSystemService(NotificationManager.class);
+            notificationManager.cancel(orderNotificationId(assignmentId));
+            notificationManager.cancel(readyNotificationId(assignmentId));
             synchronized (this) {
                 activeAssignmentNotifications.remove(assignmentId);
+                activeReadyNotifications.remove(assignmentId);
             }
 
             // Re-check immediately: if another assignment is still waiting,
